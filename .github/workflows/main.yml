@@ -8,6 +8,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: unzip -q NightGuard.zip
+      - name: Fix UI code
+        run: |
+          F=NightGuard/app/src/main/java/com/nightguard/app/MainActivity.kt
+          sed -i 's/^private val Red = ButtonDefaults.buttonColors(\(.*\))$/@Composable\nprivate fun redBtn() = ButtonDefaults.buttonColors(\1)/' $F
+          sed -i 's/colors = Red/colors = redBtn()/g' $F
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
