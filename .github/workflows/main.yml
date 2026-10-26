@@ -8,11 +8,531 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: unzip -q NightGuard.zip
-      - name: Fix UI code
+      - name: New UI
         run: |
-          F=NightGuard/app/src/main/java/com/nightguard/app/MainActivity.kt
-          sed -i 's/^private val Red = ButtonDefaults.buttonColors(\(.*\))$/@Composable\nprivate fun redBtn() = ButtonDefaults.buttonColors(\1)/' $F
-          sed -i 's/colors = Red/colors = redBtn()/g' $F
+          cat > NightGuard/app/src/main/java/com/nightguard/app/MainActivity.kt <<'KOTLIN_EOF'
+          package com.nightguard.app
+
+          import android.Manifest
+          import android.app.ActivityManager
+          import android.app.admin.DevicePolicyManager
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ApplicationInfo
+          import android.content.pm.PackageManager
+          import android.location.Location
+          import android.location.LocationManager
+          import android.media.AudioAttributes
+          import android.media.AudioManager
+          import android.media.RingtoneManager
+          import android.net.Uri
+          import android.os.Bundle
+          import android.widget.Toast
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
+          import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+          import androidx.biometric.BiometricPrompt
+          import androidx.compose.foundation.BorderStroke
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.material.icons.Icons
+          import androidx.compose.material.icons.filled.Add
+          import androidx.compose.material.icons.filled.CheckCircle
+          import androidx.compose.material.icons.filled.Delete
+          import androidx.compose.material.icons.filled.Edit
+          import androidx.compose.material.icons.filled.Home
+          import androidx.compose.material.icons.filled.Info
+          import androidx.compose.material.icons.filled.LocationOn
+          import androidx.compose.material.icons.filled.Lock
+          import androidx.compose.material.icons.filled.Phone
+          import androidx.compose.material.icons.filled.Search
+          import androidx.compose.material.icons.filled.Settings
+          import androidx.compose.material.icons.filled.Star
+          import androidx.compose.material.icons.filled.Warning
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.vector.ImageVector
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.platform.LocalLayoutDirection
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.LayoutDirection
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.core.content.ContextCompat
+          import androidx.fragment.app.FragmentActivity
+          import java.util.Locale
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+
+          private val BG = Color(0xFF0B1020)
+          private val CardBg = Color(0xFF151B30)
+          private val Line = Color(0xFF26304F)
+          private val Gold = Color(0xFFF5C26B)
+          private val Green = Color(0xFF4ADE80)
+          private val RedC = Color(0xFFD63B40)
+          private val Muted = Color(0xFFA3AECB)
+          private val Txt = Color(0xFFE8ECF8)
+
+          class MainActivity : FragmentActivity() {
+              val unlocked = mutableStateOf(false)
+              private var stopAt = System.currentTimeMillis()
+              private val bg = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+              private val perms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+                  bg.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+              }
+
+              fun requestPerms() = perms.launch(
+                  arrayOf(
+                      Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
+                      Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.POST_NOTIFICATIONS
+                  )
+              )
+
+              fun auth() {
+                  val info = BiometricPrompt.PromptInfo.Builder().setTitle("حارس الليل")
+                      .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL).build()
+                  BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
+                      override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) { unlocked.value = true }
+                  }).authenticate(info)
+              }
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  auth()
+                  setContent { App(this) }
+              }
+
+              override fun onStop() { super.onStop(); stopAt = System.currentTimeMillis() }
+              override fun onStart() {
+                  super.onStart()
+                  if (unlocked.value && System.currentTimeMillis() - stopAt > 60_000) { unlocked.value = false; auth() }
+              }
+          }
+
+          @Suppress("DEPRECATION")
+          private fun isRunning(c: Context, cls: Class<*>): Boolean =
+              c.getSystemService(ActivityManager::class.java).getRunningServices(100).any { it.service.className == cls.name }
+
+          @Suppress("DEPRECATION")
+          private fun userApps(c: Context): Int =
+              c.packageManager.getInstalledApplications(0).count { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
+
+          @Composable
+          private fun Panel(modifier: Modifier = Modifier, border: Color = Line, onClick: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
+              val m = modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
+              Card(modifier = m, shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = CardBg), border = BorderStroke(1.dp, border), content = content)
+          }
+
+          @Composable
+          private fun Btn(text: String, color: Color, fg: Color, modifier: Modifier = Modifier, onClick: () -> Unit) =
+              Button(onClick = onClick, modifier = modifier.heightIn(min = 52.dp), shape = RoundedCornerShape(14.dp), contentPadding = PaddingValues(horizontal = 8.dp),
+                  colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = fg)) { Text(text, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
+
+          @Composable
+          private fun Header(title: String, sub: String, trailing: @Composable () -> Unit = {}) {
+              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                  Icon(Icons.Filled.CheckCircle, null, tint = Gold, modifier = Modifier.size(34.dp))
+                  Column(Modifier.weight(1f)) {
+                      Text(title, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                      Text(sub, fontSize = 12.sp, color = Muted)
+                  }
+                  trailing()
+              }
+          }
+
+          @Composable
+          private fun StatusRow(icon: ImageVector, title: String, value: String, vc: Color, onClick: (() -> Unit)? = null) {
+              Panel(onClick = onClick) {
+                  Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Icon(icon, null, tint = Gold)
+                      Text(title, Modifier.weight(1f), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                      Text(value, color = vc, fontSize = 13.sp)
+                  }
+              }
+          }
+
+          @Composable
+          private fun SwitchRow(title: String, sub: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+              Panel {
+                  Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Column(Modifier.weight(1f)) {
+                          Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = if (enabled) Txt else Muted)
+                          if (sub.isNotEmpty()) Text(sub, fontSize = 12.sp, color = Muted)
+                      }
+                      Switch(checked, onChange, enabled = enabled, colors = SwitchDefaults.colors(checkedTrackColor = Green, checkedThumbColor = BG, uncheckedTrackColor = Line, uncheckedThumbColor = Muted, uncheckedBorderColor = Line))
+                  }
+              }
+          }
+
+          @Composable
+          fun App(a: MainActivity) {
+              CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+                  MaterialTheme(colorScheme = darkColorScheme(primary = Gold, onPrimary = BG, background = BG, surface = CardBg, onBackground = Txt, onSurface = Txt, surfaceVariant = Line)) {
+                      Surface(Modifier.fillMaxSize(), color = BG) {
+                          if (a.unlocked.value) Main(a) else Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) {
+                              Text("حارس الليل", fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                              Spacer(Modifier.height(16.dp))
+                              Button(onClick = { a.auth() }) { Text("فتح التطبيق") }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun Main(a: MainActivity) {
+              var tab by remember { mutableIntStateOf(0) }
+              var page by remember { mutableStateOf("") }
+              BackHandler(page != "") { page = "" }
+              val names = listOf("الرئيسية", "التتبع", "الخزنة", "الليل")
+              val icons = listOf(Icons.Filled.Home, Icons.Filled.LocationOn, Icons.Filled.Lock, Icons.Filled.Star)
+              Scaffold(containerColor = BG, bottomBar = {
+                  if (page == "") NavigationBar(containerColor = Color(0xFF0F1530)) {
+                      names.forEachIndexed { i, n ->
+                          NavigationBarItem(
+                              selected = tab == i, onClick = { tab = i },
+                              icon = { if (i == 3) Text("🌙", fontSize = 20.sp) else Icon(icons[i], null) },
+                              label = { Text(n, fontSize = 12.sp) },
+                              colors = NavigationBarItemDefaults.colors(selectedIconColor = Gold, selectedTextColor = Gold, indicatorColor = Line, unselectedIconColor = Muted, unselectedTextColor = Muted)
+                          )
+                      }
+                  }
+              }) { pad ->
+                  Box(Modifier.padding(pad).padding(horizontal = 20.dp, vertical = 16.dp).fillMaxSize()) {
+                      if (page == "settings") SettingsScreen(a)
+                      else if (page == "scan") ScanScreen()
+                      else when (tab) {
+                          0 -> Home({ tab = 1 }, { page = "settings" }, { page = "scan" })
+                          1 -> TrackScreen()
+                          2 -> VaultScreen()
+                          else -> NightScreen()
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun Home(toTrack: () -> Unit, toSettings: () -> Unit, toScan: () -> Unit) {
+              val c = LocalContext.current
+              var tick by remember { mutableIntStateOf(0) }
+              LaunchedEffect(Unit) { while (true) { delay(1500); tick++ } }
+              val phone = remember(tick) { Store.get(c, "phone").isNotBlank() }
+              val admin = remember(tick) { c.getSystemService(DevicePolicyManager::class.java).isAdminActive(ComponentName(c, AdminReceiver::class.java)) }
+              val loc = remember(tick) { ContextCompat.checkSelfPermission(c, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED }
+              val ok = phone && admin && loc
+              val col = if (ok) Green else Gold
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                  Header("حارس الليل", "Night Guard") {
+                      IconButton(onClick = toSettings) { Icon(Icons.Filled.Settings, "الإعدادات", tint = Txt) }
+                  }
+                  Column(Modifier.fillMaxWidth().padding(vertical = 24.dp).clickable(enabled = !ok) { toSettings() }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                      Box(Modifier.size(168.dp).border(6.dp, col, CircleShape), contentAlignment = Alignment.Center) {
+                          Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Icon(if (ok) Icons.Filled.CheckCircle else Icons.Filled.Warning, null, tint = col, modifier = Modifier.size(52.dp))
+                              Text(if (ok) "جهازك محمي" else "الإعداد ناقص", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                          }
+                      }
+                      Text(if (ok) "كل الأساسيات جاهزة" else "اضغط لإكمال الإعدادات", color = Muted, fontSize = 13.sp)
+                  }
+                  StatusRow(Icons.Filled.LocationOn, "صلاحية الموقع", if (loc) "مفعّلة" else "ناقصة", if (loc) Green else Gold)
+                  StatusRow(Icons.Filled.Lock, "مدير الجهاز (للقفل)", if (admin) "مفعّل" else "غير مفعّل", if (admin) Green else Gold)
+                  StatusRow(Icons.Filled.Phone, "رقم الطوارئ", if (phone) "محفوظ" else "غير مضبوط", if (phone) Green else Gold)
+                  StatusRow(Icons.Filled.Search, "الفحص الأمني", "افحص الآن", Gold, toScan)
+                  Btn("بلّغ عن سرقة الآن", RedC, Color.White, Modifier.fillMaxWidth()) { Guard.trigger(c, null); toTrack() }
+              }
+          }
+
+          @Composable
+          fun TrackScreen() {
+              val c = LocalContext.current
+              var active by remember { mutableStateOf(isRunning(c, TheftService::class.java)) }
+              var loc by remember { mutableStateOf<Location?>(null) }
+              var siren by remember { mutableStateOf(false) }
+              val ring = remember { RingtoneManager.getRingtone(c, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)) }
+              DisposableEffect(Unit) { onDispose { ring.stop() } }
+              LaunchedEffect(Unit) {
+                  while (true) {
+                      active = isRunning(c, TheftService::class.java)
+                      loc = try {
+                          val lm = c.getSystemService(LocationManager::class.java)
+                          lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                      } catch (e: Exception) { null }
+                      delay(2000)
+                  }
+              }
+              val l = loc
+              val shape = RoundedCornerShape(16.dp)
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                  Box(Modifier.fillMaxWidth().clip(shape).background(if (active) RedC else CardBg).border(1.dp, if (active) RedC else Line, shape).padding(16.dp)) {
+                      Column {
+                          Text(if (active) "وضع السرقة مفعّل" else "وضع السرقة غير مفعّل", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Txt)
+                          Text(if (active) "الموقع بيتبعت لرقم الطوارئ كل دقيقتين" else "اضغط تفعيل لبدء التتبع", fontSize = 13.sp, color = Txt)
+                      }
+                  }
+                  Box(Modifier.fillMaxWidth().height(250.dp).clip(shape).background(Color(0xFF101830)).border(1.dp, Line, shape)) {
+                      Canvas(Modifier.fillMaxSize()) {
+                          val st = 36.dp.toPx()
+                          val gc = Color(0xFF1B2545)
+                          var x = 0f
+                          while (x < size.width) { drawLine(gc, Offset(x, 0f), Offset(x, size.height)); x += st }
+                          var y = 0f
+                          while (y < size.height) { drawLine(gc, Offset(0f, y), Offset(size.width, y)); y += st }
+                          if (l != null) {
+                              drawCircle(RedC.copy(alpha = 0.25f), 30.dp.toPx(), center)
+                              drawCircle(Color.White, 12.dp.toPx(), center)
+                              drawCircle(RedC, 9.dp.toPx(), center)
+                          }
+                      }
+                      Text(
+                          if (l != null) String.format(Locale.US, "%.5f , %.5f", l.latitude, l.longitude) else "لا يوجد موقع بعد",
+                          Modifier.align(Alignment.TopStart).padding(12.dp).background(BG, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 6.dp),
+                          color = Gold, fontSize = 13.sp
+                      )
+                  }
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Panel(Modifier.weight(1f)) {
+                          Column(Modifier.padding(14.dp)) {
+                              Text("آخر تحديث", fontSize = 12.sp, color = Muted)
+                              val s = if (l != null) (System.currentTimeMillis() - l.time) / 1000 else 0L
+                              Text(if (l == null) "—" else if (s < 60) "منذ $s ثانية" else "منذ ${s / 60} دقيقة", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                          }
+                      }
+                      Panel(Modifier.weight(1f)) {
+                          Column(Modifier.padding(14.dp)) {
+                              Text("الدقة", fontSize = 12.sp, color = Muted)
+                              Text(if (l == null) "—" else "${l.accuracy.toInt()} متر", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                          }
+                      }
+                  }
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                      Btn(if (siren) "إيقاف الصفارة" else "صفارة", Gold, BG, Modifier.weight(1f)) {
+                          if (siren) ring.stop() else {
+                              val am = c.getSystemService(AudioManager::class.java)
+                              am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0)
+                              ring.audioAttributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build()
+                              ring.isLooping = true
+                              ring.play()
+                          }
+                          siren = !siren
+                      }
+                      Btn("قفل", Line, Txt, Modifier.weight(1f)) {
+                          val dpm = c.getSystemService(DevicePolicyManager::class.java)
+                          if (dpm.isAdminActive(ComponentName(c, AdminReceiver::class.java))) dpm.lockNow()
+                          else Toast.makeText(c, "فعّل مدير الجهاز من الإعدادات", Toast.LENGTH_LONG).show()
+                      }
+                      Btn(if (active) "إيقاف التتبع" else "تفعيل", if (active) Line else RedC, if (active) Txt else Color.White, Modifier.weight(1f)) {
+                          if (active) c.stopService(Intent(c, TheftService::class.java)) else Guard.trigger(c, null)
+                          active = !active
+                      }
+                  }
+                  Btn("فتح في الخرائط", Line, Txt, Modifier.fillMaxWidth()) {
+                      if (l != null) {
+                          try { c.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:${l.latitude},${l.longitude}?q=${l.latitude},${l.longitude}"))) } catch (e: Exception) { }
+                      } else Toast.makeText(c, "لا يوجد موقع بعد", Toast.LENGTH_SHORT).show()
+                  }
+              }
+          }
+
+          private val cats = listOf("كلمات مرور" to Icons.Filled.Lock, "ملاحظات" to Icons.Filled.Edit, "حسابات وبطاقات" to Icons.Filled.Info, "مهم" to Icons.Filled.Star)
+
+          private fun catOf(s: String) = if (s.length > 1 && s[1] == '|' && s[0] in '0'..'3') s[0] - '0' else 1
+          private fun bodyOf(s: String) = if (s.length > 1 && s[1] == '|' && s[0] in '0'..'3') s.substring(2) else s
+
+          @Composable
+          fun VaultScreen() {
+              val c = LocalContext.current
+              var items by remember { mutableStateOf(Vault.load(c)) }
+              var q by remember { mutableStateOf("") }
+              var sel by remember { mutableIntStateOf(-1) }
+              var dlg by remember { mutableStateOf(false) }
+              val shown = items.filter { (sel < 0 || catOf(it) == sel) && bodyOf(it).contains(q, true) }
+              Box(Modifier.fillMaxSize()) {
+                  Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                      Header("الخزنة", "مشفّرة بالكامل على جهازك") {
+                          Text("AES-256", color = Green, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.background(Line, RoundedCornerShape(10.dp)).padding(horizontal = 10.dp, vertical = 4.dp))
+                      }
+                      OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("ابحث في الخزنة") }, leadingIcon = { Icon(Icons.Filled.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp))
+                      for (r in 0..1) {
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                              for (k in 0..1) {
+                                  val i = r * 2 + k
+                                  Panel(Modifier.weight(1f), border = if (sel == i) Gold else Line, onClick = { sel = if (sel == i) -1 else i }) {
+                                      Column(Modifier.padding(14.dp).height(68.dp), verticalArrangement = Arrangement.SpaceBetween) {
+                                          Icon(cats[i].second, null, tint = Gold)
+                                          Row(Modifier.fillMaxWidth()) {
+                                              Text(cats[i].first, Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                              Text(items.count { catOf(it) == i }.toString(), color = Muted)
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      Text(if (sel < 0) "كل المحفوظات" else cats[sel].first, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                      if (shown.isEmpty()) Text("مفيش حاجة محفوظة هنا. اضغط + للإضافة.", color = Muted, fontSize = 13.sp)
+                      shown.forEach { s ->
+                          Panel {
+                              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                  Icon(cats[catOf(s)].second, null, tint = Gold, modifier = Modifier.padding(start = 16.dp))
+                                  Text(bodyOf(s), Modifier.weight(1f).padding(12.dp))
+                                  IconButton(onClick = { items = items - s; Vault.save(c, items) }) { Icon(Icons.Filled.Delete, "حذف", tint = Muted) }
+                              }
+                          }
+                      }
+                      Spacer(Modifier.height(72.dp))
+                  }
+                  FloatingActionButton(onClick = { dlg = true }, modifier = Modifier.align(Alignment.BottomEnd), containerColor = Gold, contentColor = BG) {
+                      Icon(Icons.Filled.Add, "إضافة")
+                  }
+              }
+              if (dlg) {
+                  var t by remember { mutableStateOf("") }
+                  var k by remember { mutableIntStateOf(if (sel >= 0) sel else 0) }
+                  AlertDialog(
+                      onDismissRequest = { dlg = false },
+                      title = { Text("إضافة للخزنة") },
+                      text = {
+                          Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              OutlinedTextField(t, { t = it }, Modifier.fillMaxWidth(), label = { Text("المحتوى") })
+                              cats.forEachIndexed { i, p ->
+                                  if (i == k) Button(onClick = { k = i }, modifier = Modifier.fillMaxWidth()) { Text(p.first) }
+                                  else OutlinedButton(onClick = { k = i }, modifier = Modifier.fillMaxWidth()) { Text(p.first) }
+                              }
+                          }
+                      },
+                      confirmButton = {
+                          TextButton(onClick = { if (t.isNotBlank()) { items = items + "$k|$t"; Vault.save(c, items); dlg = false } }) { Text("حفظ مشفّر") }
+                      },
+                      dismissButton = { TextButton(onClick = { dlg = false }) { Text("إلغاء") } }
+                  )
+              }
+          }
+
+          @Composable
+          fun NightScreen() {
+              val c = LocalContext.current
+              var on by remember { mutableStateOf(isRunning(c, NightService::class.java)) }
+              LaunchedEffect(Unit) { while (true) { on = isRunning(c, NightService::class.java); delay(2000) } }
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                  Header("وضع الليل", "حراسة ضد الحركة")
+                  SwitchRow("تفعيل وضع الليل", "الصفارة تشتغل لو الجهاز اتحرك بعد ١٠ ثواني من التفعيل", on, true) { v ->
+                      if (v) c.startForegroundService(Intent(c, NightService::class.java)) else c.stopService(Intent(c, NightService::class.java))
+                      on = v
+                  }
+                  Text("قريبًا", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Muted)
+                  SwitchRow("تفعيل تلقائي بالجدول", "قريبًا", false, false) {}
+                  SwitchRow("تصوير من يحاول الفتح", "قريبًا", false, false) {}
+                  SwitchRow("حراسة الجيب", "قريبًا", false, false) {}
+              }
+          }
+
+          @Composable
+          fun ScanScreen() {
+              val c = LocalContext.current
+              val scope = rememberCoroutineScope()
+              var res by remember { mutableStateOf<List<Finding>?>(null) }
+              var busy by remember { mutableStateOf(false) }
+              var total by remember { mutableIntStateOf(0) }
+              var hidden by remember { mutableStateOf(setOf<String>()) }
+              val r = res?.filter { it.pkg !in hidden }
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                  Header("الفحص الأمني", "تحليل الصلاحيات والسلوك")
+                  Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                      Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
+                          if (busy) CircularProgressIndicator(Modifier.fillMaxSize(), color = Green, strokeWidth = 10.dp, trackColor = Line)
+                          else CircularProgressIndicator(progress = 1f, modifier = Modifier.fillMaxSize(), color = if (r == null) Line else if (r.isEmpty()) Green else RedC, strokeWidth = 10.dp, trackColor = Line)
+                          Text(if (busy) "جاري الفحص" else if (r == null) "جاهز للفحص" else if (r.isEmpty()) "جهازك آمن" else "${r.size} للمراجعة", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                      }
+                  }
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                      Panel(Modifier.weight(1f)) {
+                          Column(Modifier.padding(14.dp)) {
+                              Text(total.toString(), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                              Text("تطبيق تم فحصه", fontSize = 12.sp, color = Muted)
+                          }
+                      }
+                      Panel(Modifier.weight(1f)) {
+                          Column(Modifier.padding(14.dp)) {
+                              Text((r?.size ?: 0).toString(), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF8A8A))
+                              Text("تطبيق للمراجعة", fontSize = 12.sp, color = Muted)
+                          }
+                      }
+                  }
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      listOf("تحليل الصلاحيات", "خدمات الوصول", "مصدر التثبيت").forEach {
+                          Text("● $it", fontSize = 12.sp, modifier = Modifier.background(CardBg, RoundedCornerShape(12.dp)).border(1.dp, Line, RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp))
+                      }
+                  }
+                  Btn(if (busy) "جاري الفحص..." else "افحص جهازك", Gold, BG, Modifier.fillMaxWidth()) {
+                      if (!busy) {
+                          busy = true
+                          scope.launch {
+                              val out = withContext(Dispatchers.Default) { Pair(Scanner.scan(c), userApps(c)) }
+                              res = out.first; total = out.second; hidden = emptySet(); busy = false
+                          }
+                      }
+                  }
+                  if (r != null && r.isEmpty()) Text("لم نجد تطبيقات مشبوهة", color = Green)
+                  r?.forEach { f ->
+                      Panel(border = RedC) {
+                          Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                              Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                  Icon(Icons.Filled.Warning, null, tint = Color(0xFFFF8A8A), modifier = Modifier.size(24.dp))
+                                  Column(Modifier.weight(1f)) {
+                                      Text(f.label, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                                      Text(f.reasons.joinToString(" • "), fontSize = 12.sp, color = Muted)
+                                  }
+                              }
+                              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                  Btn("إزالة", RedC, Color.White, Modifier.weight(1f)) {
+                                      c.startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + f.pkg)))
+                                  }
+                                  Btn("تجاهل", Line, Txt, Modifier.weight(1f)) { hidden = hidden + f.pkg }
+                              }
+                          }
+                      }
+                  }
+                  Text("الفحص بيعتمد على الصلاحيات والسلوك، وليس بديلًا عن مضاد فيروسات كامل.", fontSize = 12.sp, color = Muted)
+              }
+          }
+
+          @Composable
+          fun SettingsScreen(a: MainActivity) {
+              val c = LocalContext.current
+              var phone by remember { mutableStateOf(Store.get(c, "phone")) }
+              var pin by remember { mutableStateOf(Store.get(c, "pin")) }
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                  Header("الإعدادات", "الصلاحيات والتفعيل عن بُعد")
+                  Text("رقم الطوارئ (بيوصله الموقع برسالة)", color = Muted, fontSize = 13.sp)
+                  OutlinedTextField(phone, { phone = it; Store.set(c, "phone", it) }, Modifier.fillMaxWidth(), singleLine = true)
+                  Text("كود التفعيل عن بُعد (٤ أحرف أو أكتر)", color = Muted, fontSize = 13.sp)
+                  OutlinedTextField(pin, { pin = it; Store.set(c, "pin", it) }, Modifier.fillMaxWidth(), singleLine = true)
+                  Text("لو الجهاز اتسرق ابعت من أي موبايل رسالة: NIGHTGUARD ثم مسافة ثم الكود. هيتقفل ويبدأ يبعتلك الموقع.", fontSize = 13.sp)
+                  Btn("١) إعطاء الصلاحيات", Gold, BG, Modifier.fillMaxWidth()) { a.requestPerms() }
+                  Btn("٢) تفعيل مدير الجهاز (للقفل)", Gold, BG, Modifier.fillMaxWidth()) {
+                      c.startActivity(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, ComponentName(c, AdminReceiver::class.java)))
+                  }
+                  Text("اختار الموقع «السماح طوال الوقت»، واجعل البطارية «غير مقيّدة» للتطبيق من إعدادات الموبايل.", fontSize = 12.sp, color = Muted)
+              }
+          }
+          KOTLIN_EOF
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
