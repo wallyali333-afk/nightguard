@@ -356,4 +356,9 @@ jobs:
                           }
                       }
                       Text(
-                          if (l != null
+                          if (l != null) String.format(Locale.US, "GPS: %.5f , %.5f", l.latitude, l.longitude) else "جاري جلب إحداثيات GPS الحقيقية...",
+                          Modifier.align(Alignment.TopStart).padding(12.dp).background(BG, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 6.dp),
+                          color = Gold, fontSize = 13.sp
+                      )
+                  }
+                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(
