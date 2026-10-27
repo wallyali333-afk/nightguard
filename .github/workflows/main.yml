@@ -12,25 +12,30 @@ jobs:
       - run: unzip -q NightGuard.zip
       - name: Restore app code
         run: |
-          M="KOTLIN""_EOF"
-          SRC=""
-          for H in $(git log --format=%H -- .github/workflows/main.yml); do
-            if git show "$H:.github/workflows/main.yml" | grep -q "$M"; then SRC=$H; break; fi
-          done
-          test -n "$SRC" || { echo "old build file not found"; exit 1; }
-          git show "$SRC:.github/workflows/main.yml" > /tmp/old.yml
           python3 - <<'PY'
-          import re
-          src = open('/tmp/old.yml', encoding='utf-8').read()
-          m = "KOTLIN" + "_EOF"
-          n = 0
-          for g in re.finditer(r"cat > (\S+) <<'" + m + r"'\n(.*?)\n[ ]*" + m, src, re.S):
-              lines = g.group(2).split("\n")
-              ind = min(len(l) - len(l.lstrip(" ")) for l in lines if l.strip())
-              open(g.group(1), "w", encoding="utf-8").write("\n".join(l[ind:] for l in lines) + "\n")
-              n += 1
-          print("restored files:", n)
-          assert n >= 1
+          import re, subprocess
+          def sh(*a):
+              return subprocess.run(a, capture_output=True, text=True).stdout.replace("\r\n", "\n")
+          commits = sh('git', 'log', '--format=%H', '--', '.github/workflows/main.yml').split()
+          print('commits in history:', len(commits))
+          for tag in ('KOTLIN', 'AV'):
+              m = tag + '_EOF'
+              pat = re.compile(r"cat\s*>\s*(\S+)\s*<<\s*'" + m + r"'[ \t]*\n(.*?)\n[ \t]*" + m, re.S)
+              found = None
+              for h in commits:
+                  t = sh('git', 'show', h + ':.github/workflows/main.yml')
+                  blocks = pat.findall(t)
+                  print(tag, h[:7], 'blocks:', len(blocks))
+                  if blocks:
+                      found = blocks
+                      break
+              assert found, 'no commit in history has ' + tag + ' blocks'
+              for path, body in found:
+                  path = path.replace('$D', 'NightGuard/app/src/main')
+                  lines = body.split("\n")
+                  ind = min(len(l) - len(l.lstrip(" ")) for l in lines if l.strip())
+                  open(path, "w", encoding="utf-8").write("\n".join(l[ind:] for l in lines) + "\n")
+                  print('restored', path)
           PY
       - name: Cairo font
         run: |
@@ -46,285 +51,28 @@ jobs:
             rm -f $D/res/font/cairo.ttf
             printf 'package com.nightguard.app\n\nimport androidx.compose.ui.text.font.FontFamily\n\nval CairoFont = FontFamily.Default\n' > $D/java/com/nightguard/app/Fonts.kt
           fi
-      - name: Antivirus scan
+      - name: Patches
         run: |
           D=NightGuard/app/src/main
           sed -i 's/^fun ScanScreen()/fun OldScanScreen()/' $D/java/com/nightguard/app/MainActivity.kt
           grep -q "fun OldScanScreen" $D/java/com/nightguard/app/MainActivity.kt
           sed -i 's#<uses-permission android:name="android.permission.USE_BIOMETRIC" />#&\n    <uses-permission android:name="android.permission.INTERNET" />#' $D/AndroidManifest.xml
           grep -q "permission.INTERNET" $D/AndroidManifest.xml
-          cat > $D/java/com/nightguard/app/Av.kt <<'AV_EOF'
-          package com.nightguard.app
-
-          import android.content.Context
-          import android.content.Intent
-          import android.content.pm.ApplicationInfo
-          import android.net.Uri
-          import android.widget.Toast
-          import androidx.activity.compose.rememberLauncherForActivityResult
-          import androidx.activity.result.contract.ActivityResultContracts
-          import androidx.compose.foundation.layout.*
-          import androidx.compose.foundation.rememberScrollState
-          import androidx.compose.foundation.verticalScroll
-          import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.Warning
-          import androidx.compose.material3.*
-          import androidx.compose.runtime.*
-          import androidx.compose.ui.Alignment
-          import androidx.compose.ui.Modifier
-          import androidx.compose.ui.graphics.Color
-          import androidx.compose.ui.platform.LocalContext
-          import androidx.compose.ui.text.font.FontWeight
-          import androidx.compose.ui.unit.dp
-          import androidx.compose.ui.unit.sp
-          import java.io.File
-          import java.io.InputStream
-          import java.net.HttpURLConnection
-          import java.net.URL
-          import java.security.MessageDigest
-          import kotlinx.coroutines.CoroutineScope
-          import kotlinx.coroutines.Dispatchers
-          import kotlinx.coroutines.Job
-          import kotlinx.coroutines.SupervisorJob
-          import kotlinx.coroutines.delay
-          import kotlinx.coroutines.isActive
-          import kotlinx.coroutines.launch
-          import kotlinx.coroutines.withContext
-          import org.json.JSONObject
-
-          class AvHit(val pkg: String, val label: String, val mal: Int, val sus: Int, val total: Int)
-
-          object Av {
-              // code: 0 = found, 1 = unknown to VirusTotal, 2 = bad key, 3 = quota, 4 = network/other
-              class Res(val code: Int, val mal: Int, val sus: Int, val total: Int)
-
-              private fun p(c: Context) = c.getSharedPreferences("ng_av", 0)
-
-              fun sha256(ins: InputStream): String {
-                  val md = MessageDigest.getInstance("SHA-256")
-                  val buf = ByteArray(65536)
-                  while (true) {
-                      val n = ins.read(buf)
-                      if (n <= 0) break
-                      md.update(buf, 0, n)
-                  }
-                  return md.digest().joinToString("") { "%02x".format(it) }
-              }
-
-              fun cached(c: Context, sha: String): Res? = try {
-                  val a = (p(c).getString("h:" + sha, null) ?: "").split("|")
-                  if (a.size < 5 || System.currentTimeMillis() - a[4].toLong() > 3L * 24 * 3600 * 1000) null
-                  else Res(a[0].toInt(), a[1].toInt(), a[2].toInt(), a[3].toInt())
-              } catch (e: Exception) { null }
-
-              fun store(c: Context, sha: String, r: Res) {
-                  p(c).edit().putString("h:" + sha, r.code.toString() + "|" + r.mal + "|" + r.sus + "|" + r.total + "|" + System.currentTimeMillis()).apply()
-              }
-
-              fun lookup(key: String, sha: String): Res = try {
-                  val con = URL("https://www.virustotal.com/api/v3/files/" + sha).openConnection() as HttpURLConnection
-                  con.setRequestProperty("x-apikey", key)
-                  con.connectTimeout = 15000
-                  con.readTimeout = 20000
-                  when (con.responseCode) {
-                      200 -> {
-                          val body = con.inputStream.bufferedReader().use { it.readText() }
-                          val st = JSONObject(body).getJSONObject("data").getJSONObject("attributes").getJSONObject("last_analysis_stats")
-                          val mal = st.optInt("malicious")
-                          val sus = st.optInt("suspicious")
-                          Res(0, mal, sus, mal + sus + st.optInt("undetected") + st.optInt("harmless"))
-                      }
-                      404 -> Res(1, 0, 0, 0)
-                      401, 403 -> Res(2, 0, 0, 0)
-                      429 -> Res(3, 0, 0, 0)
-                      else -> Res(4, 0, 0, 0)
-                  }
-              } catch (e: Exception) { Res(4, 0, 0, 0) }
-          }
-
-          object AvRun {
-              private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-              private var job: Job? = null
-              var running by mutableStateOf(false)
-              var finished by mutableStateOf(false)
-              var done by mutableIntStateOf(0)
-              var total by mutableIntStateOf(0)
-              var unknown by mutableIntStateOf(0)
-              var status by mutableStateOf("")
-              val hits = mutableStateListOf<AvHit>()
-              val ignored = mutableStateListOf<String>()
-
-              fun stop() {
-                  job?.cancel()
-                  running = false
-              }
-
-              fun start(c: Context) {
-                  if (running) return
-                  val ctx = c.applicationContext
-                  val key = Store.get(ctx, "vtkey")
-                  running = true
-                  finished = false
-                  done = 0
-                  unknown = 0
-                  hits.clear()
-                  ignored.clear()
-                  status = "جاري التحضير..."
-                  job = scope.launch {
-                      val pm = ctx.packageManager
-                      @Suppress("DEPRECATION")
-                      val apps = pm.getInstalledApplications(0).filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 && it.packageName != ctx.packageName }
-                      total = apps.size
-                      var lastNet = 0L
-                      for (ai in apps) {
-                          if (!isActive) break
-                          val label = try { ai.loadLabel(pm).toString() } catch (e: Exception) { ai.packageName }
-                          status = label
-                          val sha = try { File(ai.sourceDir).inputStream().use { Av.sha256(it) } } catch (e: Exception) { null }
-                          if (sha == null) { done++; continue }
-                          var r = Av.cached(ctx, sha)
-                          if (r == null) {
-                              val wait = 16000L - (System.currentTimeMillis() - lastNet)
-                              if (wait > 0) delay(wait)
-                              r = Av.lookup(key, sha)
-                              lastNet = System.currentTimeMillis()
-                              if (r.code == 2) { status = "مفتاح API غير صحيح"; running = false; return@launch }
-                              if (r.code == 3) { status = "وصلت للحد المسموح (٤ في الدقيقة أو ٥٠٠ في اليوم). حاول لاحقًا، وهيكمل من حيث وقف."; running = false; return@launch }
-                              if (r.code == 4) { status = "تعذّر الاتصال بالإنترنت"; running = false; return@launch }
-                              Av.store(ctx, sha, r)
-                          }
-                          if (r.code == 1) unknown++
-                          else if (r.mal >= 1 || r.sus >= 3) hits.add(AvHit(ai.packageName, label, r.mal, r.sus, r.total))
-                          done++
-                      }
-                      status = "اكتمل الفحص"
-                      finished = true
-                      running = false
-                  }
-              }
-          }
-
-          private fun describe(r: Av.Res): String = when (r.code) {
-              0 -> if (r.mal >= 3) "⚠ خبيث: " + r.mal + " من " + r.total + " محرك رصده"
-                  else if (r.mal > 0 || r.sus > 0) "مشبوه: " + (r.mal + r.sus) + " من " + r.total + " محرك (ممكن يكون إنذار كاذب)"
-                  else "نظيف: لم يرصده أي من " + r.total + " محرك"
-              1 -> "غير معروف لدى المحركات (ملف جديد أو خاص)، مينفعش الحكم عليه"
-              2 -> "مفتاح API غير صحيح"
-              3 -> "وصلت للحد المسموح، حاول لاحقًا"
-              else -> "تعذّر الاتصال بالإنترنت"
-          }
-
-          @Composable
-          fun ScanScreen() {
-              val c = LocalContext.current
-              val scope = rememberCoroutineScope()
-              var key by remember { mutableStateOf(Store.get(c, "vtkey")) }
-              var edit by remember { mutableStateOf(Store.get(c, "vtkey").isBlank()) }
-              var fileMsg by remember { mutableStateOf("") }
-              val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-                  if (uri != null) scope.launch {
-                      fileMsg = "جاري فحص الملف..."
-                      fileMsg = withContext(Dispatchers.IO) {
-                          val sha = try { c.contentResolver.openInputStream(uri)?.use { Av.sha256(it) } } catch (e: Exception) { null }
-                          if (sha == null) "تعذّر قراءة الملف"
-                          else {
-                              var r = Av.cached(c, sha)
-                              if (r == null) {
-                                  r = Av.lookup(Store.get(c, "vtkey"), sha)
-                                  if (r.code == 0 || r.code == 1) Av.store(c, sha, r)
-                              }
-                              describe(r)
-                          }
-                      }
-                  }
-              }
-              val hits = AvRun.hits.filter { it.pkg !in AvRun.ignored }
-              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                  Header("الفحص الأمني", "فحص بصمات التطبيقات عبر محركات VirusTotal")
-                  if (edit) {
-                      Panel {
-                          Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                              Text("للفحص الحقيقي محتاج مفتاح VirusTotal API مجاني:", color = Txt, fontWeight = FontWeight.SemiBold)
-                              Text("١) افتح virustotal.com وسجّل حساب مجاني\n٢) من صورة الحساب اختار API key وانسخه\n٣) الصقه هنا", fontSize = 12.sp, color = Muted)
-                              OutlinedTextField(key, { key = it.trim() }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("VirusTotal API key") })
-                              Btn("حفظ المفتاح", Gold, BG, Modifier.fillMaxWidth()) {
-                                  if (key.length >= 32) { Store.set(c, "vtkey", key); edit = false }
-                                  else Toast.makeText(c, "المفتاح غير صحيح", Toast.LENGTH_SHORT).show()
-                              }
-                          }
-                      }
-                  } else {
-                      Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                          Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
-                              val prog = if (AvRun.finished) 1f else if (AvRun.total == 0) 0f else AvRun.done.toFloat() / AvRun.total
-                              CircularProgressIndicator(progress = prog, modifier = Modifier.fillMaxSize(), color = if (hits.any { it.mal >= 3 }) RedC else Green, strokeWidth = 10.dp, trackColor = Line)
-                              Text(
-                                  if (AvRun.running) AvRun.done.toString() + "/" + AvRun.total
-                                  else if (AvRun.finished) (if (hits.isEmpty()) "جهازك آمن" else hits.size.toString() + " للمراجعة")
-                                  else "جاهز للفحص",
-                                  fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Txt
-                              )
-                          }
-                      }
-                      if (AvRun.status.isNotBlank()) Text(AvRun.status, color = Muted, fontSize = 12.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
-                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                          Panel(Modifier.weight(1f)) {
-                              Column(Modifier.padding(12.dp)) {
-                                  Text(AvRun.done.toString(), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Txt)
-                                  Text("تم فحصه", fontSize = 11.sp, color = Muted)
-                              }
-                          }
-                          Panel(Modifier.weight(1f)) {
-                              Column(Modifier.padding(12.dp)) {
-                                  Text(AvRun.unknown.toString(), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Txt)
-                                  Text("غير معروف", fontSize = 11.sp, color = Muted)
-                              }
-                          }
-                          Panel(Modifier.weight(1f)) {
-                              Column(Modifier.padding(12.dp)) {
-                                  Text(hits.size.toString(), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF8A8A))
-                                  Text("للمراجعة", fontSize = 11.sp, color = Muted)
-                              }
-                          }
-                      }
-                      Btn(if (AvRun.running) "إيقاف الفحص" else "ابدأ فحص التطبيقات", Gold, BG, Modifier.fillMaxWidth()) {
-                          if (AvRun.running) AvRun.stop() else AvRun.start(c)
-                      }
-                      if (AvRun.running) Text("المتبقي بحد أقصى حوالي " + ((AvRun.total - AvRun.done) * 16 / 60 + 1) + " دقيقة (النتائج المحفوظة بتخلص أسرع).", fontSize = 12.sp, color = Muted)
-                      Btn("فحص ملف من الجهاز", Line, Txt, Modifier.fillMaxWidth()) { picker.launch(arrayOf("*/*")) }
-                      if (fileMsg.isNotBlank()) Text(fileMsg, color = Gold, fontSize = 13.sp)
-                      hits.forEach { h ->
-                          Panel(border = if (h.mal >= 3) RedC else Gold) {
-                              Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                  Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                      Icon(Icons.Filled.Warning, null, tint = if (h.mal >= 3) Color(0xFFFF8A8A) else Gold, modifier = Modifier.size(24.dp))
-                                      Column(Modifier.weight(1f)) {
-                                          Text(h.label, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Txt)
-                                          Text(
-                                              (if (h.mal >= 3) "خبيث: " else "مشبوه: ") + (h.mal + h.sus) + " من " + h.total + " محرك" + (if (h.mal < 3) " (ممكن إنذار كاذب)" else ""),
-                                              fontSize = 12.sp, color = Muted
-                                          )
-                                      }
-                                  }
-                                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                      Btn("إزالة", RedC, Color.White, Modifier.weight(1f)) {
-                                          c.startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + h.pkg)))
-                                      }
-                                      Btn("تجاهل", Line, Txt, Modifier.weight(1f)) { AvRun.ignored.add(h.pkg) }
-                                  }
-                              }
-                          }
-                      }
-                      TextButton(onClick = { edit = true }) { Text("تغيير مفتاح API", color = Gold) }
-                  }
-                  Text("بيتبعت بصمة الملف (SHA-256) فقط لـ VirusTotal، مش الملف نفسه. التطبيقات الجديدة أو الخاصة بتظهر «غير معروف». ده فحص عند الطلب وليس حماية لحظية، وبيحتاج إنترنت.", fontSize = 12.sp, color = Muted)
-              }
-          }
-          AV_EOF
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+      - name: Stable signing key
+        env:
+          KS: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            mkdir -p ~/.android
+            echo "$KS" | base64 -d > ~/.android/debug.keystore
+            keytool -list -keystore ~/.android/debug.keystore -storepass android | tail -3
+          else
+            echo "NO SECRET FOUND: using a random key"
+          fi
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
