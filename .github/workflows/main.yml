@@ -7,358 +7,329 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: unzip -q NightGuard.zip
-      - name: Update MainActivity with Cairo font, Real Features & Advanced UI
+      - name: Restore app code
         run: |
-          cat > NightGuard/app/src/main/java/com/nightguard/app/MainActivity.kt <<'KOTLIN_EOF'
+          M="KOTLIN""_EOF"
+          SRC=""
+          for H in $(git log --format=%H -- .github/workflows/main.yml); do
+            if git show "$H:.github/workflows/main.yml" | grep -q "$M"; then SRC=$H; break; fi
+          done
+          test -n "$SRC" || { echo "old build file not found"; exit 1; }
+          git show "$SRC:.github/workflows/main.yml" > /tmp/old.yml
+          python3 - <<'PY'
+          import re
+          src = open('/tmp/old.yml', encoding='utf-8').read()
+          m = "KOTLIN" + "_EOF"
+          n = 0
+          for g in re.finditer(r"cat > (\S+) <<'" + m + r"'\n(.*?)\n[ ]*" + m, src, re.S):
+              lines = g.group(2).split("\n")
+              ind = min(len(l) - len(l.lstrip(" ")) for l in lines if l.strip())
+              open(g.group(1), "w", encoding="utf-8").write("\n".join(l[ind:] for l in lines) + "\n")
+              n += 1
+          print("restored files:", n)
+          assert n >= 1
+          PY
+      - name: Cairo font
+        run: |
+          D=NightGuard/app/src/main
+          mkdir -p $D/res/font
+          OK=0
+          for U in "https://github.com/google/fonts/raw/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf" "https://raw.githubusercontent.com/google/fonts/main/ofl/cairo/Cairo%5Bslnt%2Cwght%5D.ttf"; do
+            if curl -fsSL "$U" -o $D/res/font/cairo.ttf && [ "$(stat -c%s $D/res/font/cairo.ttf)" -gt 50000 ]; then OK=1; break; fi
+          done
+          if [ $OK = 1 ]; then
+            printf 'package com.nightguard.app\n\nimport androidx.compose.ui.text.font.Font\nimport androidx.compose.ui.text.font.FontFamily\nimport androidx.compose.ui.text.font.FontWeight\n\nval CairoFont = FontFamily(Font(R.font.cairo, FontWeight.Normal), Font(R.font.cairo, FontWeight.Bold))\n' > $D/java/com/nightguard/app/Fonts.kt
+          else
+            rm -f $D/res/font/cairo.ttf
+            printf 'package com.nightguard.app\n\nimport androidx.compose.ui.text.font.FontFamily\n\nval CairoFont = FontFamily.Default\n' > $D/java/com/nightguard/app/Fonts.kt
+          fi
+      - name: Antivirus scan
+        run: |
+          D=NightGuard/app/src/main
+          sed -i 's/^fun ScanScreen()/fun OldScanScreen()/' $D/java/com/nightguard/app/MainActivity.kt
+          grep -q "fun OldScanScreen" $D/java/com/nightguard/app/MainActivity.kt
+          sed -i 's#<uses-permission android:name="android.permission.USE_BIOMETRIC" />#&\n    <uses-permission android:name="android.permission.INTERNET" />#' $D/AndroidManifest.xml
+          grep -q "permission.INTERNET" $D/AndroidManifest.xml
+          cat > $D/java/com/nightguard/app/Av.kt <<'AV_EOF'
           package com.nightguard.app
 
-          import android.Manifest
-          import android.app.ActivityManager
-          import android.app.admin.DevicePolicyManager
-          import android.content.ComponentName
           import android.content.Context
           import android.content.Intent
           import android.content.pm.ApplicationInfo
-          import android.content.pm.PackageManager
-          import android.location.Location
-          import android.location.LocationManager
-          import android.media.AudioAttributes
-          import android.media.AudioManager
-          import android.media.RingtoneManager
           import android.net.Uri
-          import android.os.Bundle
-          import android.telephony.SmsManager
           import android.widget.Toast
-          import androidx.activity.compose.BackHandler
-          import androidx.activity.compose.setContent
+          import androidx.activity.compose.rememberLauncherForActivityResult
           import androidx.activity.result.contract.ActivityResultContracts
-          import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
-          import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
-          import androidx.biometric.BiometricPrompt
-          import androidx.compose.animation.*
-          import androidx.compose.animation.core.*
-          import androidx.compose.foundation.*
           import androidx.compose.foundation.layout.*
-          import androidx.compose.foundation.shape.CircleShape
-          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.verticalScroll
           import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.*
+          import androidx.compose.material.icons.filled.Warning
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
-          import androidx.compose.ui.draw.clip
-          import androidx.compose.ui.geometry.Offset
           import androidx.compose.ui.graphics.Color
-          import androidx.compose.ui.graphics.vector.ImageVector
           import androidx.compose.ui.platform.LocalContext
-          import androidx.compose.ui.platform.LocalLayoutDirection
-          import androidx.compose.ui.text.font.Font
-          import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
-          import androidx.compose.ui.text.input.PasswordVisualTransformation
-          import androidx.compose.ui.unit.LayoutDirection
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
-          import androidx.core.content.ContextCompat
-          import androidx.fragment.app.FragmentActivity
-          import java.util.Locale
+          import java.io.File
+          import java.io.InputStream
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.security.MessageDigest
+          import kotlinx.coroutines.CoroutineScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.Job
+          import kotlinx.coroutines.SupervisorJob
           import kotlinx.coroutines.delay
+          import kotlinx.coroutines.isActive
           import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import org.json.JSONObject
 
-          val CairoFont = FontFamily(
-              Font(R.font.cairo_regular, FontWeight.Normal),
-              Font(R.font.cairo_bold, FontWeight.Bold)
-          )
+          class AvHit(val pkg: String, val label: String, val mal: Int, val sus: Int, val total: Int)
 
-          private val BG = Color(0xFF0B1020)
-          private val CardBg = Color(0xFF151B30)
-          private val Line = Color(0xFF26304F)
-          private val Gold = Color(0xFFF5C26B)
-          private val Green = Color(0xFF4ADE80)
-          private val RedC = Color(0xFFD63B40)
-          private val Muted = Color(0xFFA3AECB)
-          private val Txt = Color(0xFFE8ECF8)
+          object Av {
+              // code: 0 = found, 1 = unknown to VirusTotal, 2 = bad key, 3 = quota, 4 = network/other
+              class Res(val code: Int, val mal: Int, val sus: Int, val total: Int)
 
-          class MainActivity : FragmentActivity() {
-              val unlocked = mutableStateOf(false)
-              val isLoggedIn = mutableStateOf(false)
-              private var stopAt = System.currentTimeMillis()
-              
-              private val bg = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
-              private val perms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-                  bg.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-              }
+              private fun p(c: Context) = c.getSharedPreferences("ng_av", 0)
 
-              fun requestPerms() = perms.launch(
-                  arrayOf(
-                      Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION,
-                      Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.POST_NOTIFICATIONS,
-                      Manifest.permission.CAMERA
-                  )
-              )
-
-              fun auth() {
-                  val info = BiometricPrompt.PromptInfo.Builder().setTitle("حارس الليل")
-                      .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL).build()
-                  BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
-                      override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) { unlocked.value = true }
-                  }).authenticate(info)
-              }
-
-              override fun onCreate(b: Bundle?) {
-                  super.onCreate(b)
-                  auth()
-                  setContent { App(this) }
-              }
-
-              override fun onStop() { super.onStop(); stopAt = System.currentTimeMillis() }
-              override fun onStart() {
-                  super.onStart()
-                  if (unlocked.value && System.currentTimeMillis() - stopAt > 60_000) { unlocked.value = false; auth() }
-              }
-          }
-
-          @Suppress("DEPRECATION")
-          private fun isRunning(c: Context, cls: Class<*>): Boolean =
-              try { c.getSystemService(ActivityManager::class.java).getRunningServices(100).any { it.service.className == cls.name } } catch(e:Exception){false}
-
-          @Composable
-          private fun Panel(modifier: Modifier = Modifier, border: Color = Line, onClick: (() -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
-              val m = modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
-              Card(modifier = m, shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = CardBg), border = BorderStroke(1.dp, border), content = content)
-          }
-
-          @Composable
-          private fun Btn(text: String, color: Color, fg: Color, modifier: Modifier = Modifier, onClick: () -> Unit) =
-              Button(onClick = onClick, modifier = modifier.heightIn(min = 52.dp), shape = RoundedCornerShape(14.dp), contentPadding = PaddingValues(horizontal = 8.dp),
-                  colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = fg)) { Text(text, fontFamily = CairoFont, fontWeight = FontWeight.Bold, fontSize = 15.sp) }
-
-          @Composable
-          private fun Header(title: String, sub: String, trailing: @Composable () -> Unit = {}) {
-              Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                  Icon(Icons.Filled.CheckCircle, null, tint = Gold, modifier = Modifier.size(34.dp))
-                  Column(Modifier.weight(1f)) {
-                      Text(title, fontFamily = CairoFont, fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Txt)
-                      Text(sub, fontFamily = CairoFont, fontSize = 12.sp, color = Muted)
-                  }
-                  trailing()
-              }
-          }
-
-          @Composable
-          fun App(a: MainActivity) {
-              CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                  MaterialTheme(
-                      colorScheme = darkColorScheme(primary = Gold, onPrimary = BG, background = BG, surface = CardBg, onBackground = Txt, onSurface = Txt, surfaceVariant = Line),
-                      typography = Typography().let {
-                          it.copy(
-                              bodyLarge = it.bodyLarge.copy(fontFamily = CairoFont),
-                              bodyMedium = it.bodyMedium.copy(fontFamily = CairoFont),
-                              titleLarge = it.titleLarge.copy(fontFamily = CairoFont)
-                          )
-                      }
-                  ) {
-                      Surface(Modifier.fillMaxSize(), color = BG) {
-                          if (!a.isLoggedIn.value) {
-                              AuthScreen(a)
-                          } else if (!a.unlocked.value) {
-                              Column(Modifier.fillMaxSize(), Arrangement.Center, Alignment.CenterHorizontally) {
-                                  Text("حارس الليل", fontFamily = CairoFont, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Txt)
-                                  Spacer(Modifier.height(16.dp))
-                                  Button(onClick = { a.auth() }) { Text("فتح التطبيق بصمة / رمز", fontFamily = CairoFont) }
-                              }
-                          } else {
-                              Main(a)
-                          }
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          fun AuthScreen(a: MainActivity) {
-              var isRegister by remember { mutableStateOf(false) }
-              var email by remember { mutableStateOf("") }
-              var pass by remember { mutableStateOf("") }
-              val c = LocalContext.current
-
-              Column(Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()), Arrangement.Center, Alignment.CenterHorizontally) {
-                  Icon(Icons.Filled.Lock, null, tint = Gold, modifier = Modifier.size(64.dp))
-                  Spacer(Modifier.height(16.dp))
-                  Text(if (isRegister) "إنشاء حساب جديد" else "تسجيل الدخول", fontFamily = CairoFont, fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Txt)
-                  Spacer(Modifier.height(24.dp))
-                  OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("البريد الإلكتروني أو الهاتف", fontFamily = CairoFont) }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                  Spacer(Modifier.height(12.dp))
-                  OutlinedTextField(value = pass, onValueChange = { pass = it }, label = { Text("كلمة المرور", fontFamily = CairoFont) }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
-                  Spacer(Modifier.height(20.dp))
-                  Btn(if (isRegister) "تسجيل حساب" else "دخول", Gold, BG, Modifier.fillMaxWidth()) {
-                      if (email.isNotBlank() && pass.isNotBlank()) {
-                          a.isLoggedIn.value = true
-                          Toast.makeText(c, "تم تسجيل الدخول بنجاح", Toast.LENGTH_SHORT).show()
-                      } else {
-                          Toast.makeText(c, "الرجاء إدخال البيانات كاملة", Toast.LENGTH_SHORT).show()
-                      }
-                  }
-                  TextButton(onClick = { isRegister = !isRegister }) {
-                      Text(if (isRegister) "لديك حساب بالفعل؟ سجل دخول" else "ليس لديك حساب؟ انشئ حساب جديد", fontFamily = CairoFont, color = Gold)
-                  }
-              }
-          }
-
-          @Composable
-          fun Main(a: MainActivity) {
-              var tab by remember { mutableIntStateOf(0) }
-              var page by remember { mutableStateOf("") }
-              BackHandler(page != "") { page = "" }
-              val names = listOf("الرئيسية", "التتبع", "الخزنة", "الليل")
-              val icons = listOf(Icons.Filled.Home, Icons.Filled.LocationOn, Icons.Filled.Lock, Icons.Filled.Star)
-              
-              Scaffold(containerColor = BG, bottomBar = {
-                  if (page == "") NavigationBar(containerColor = Color(0xFF0F1530)) {
-                      names.forEachIndexed { i, n ->
-                          NavigationBarItem(
-                              selected = tab == i, onClick = { tab = i },
-                              icon = { if (i == 3) Text("🌙", fontSize = 20.sp) else Icon(icons[i], null) },
-                              label = { Text(n, fontFamily = CairoFont, fontSize = 12.sp) },
-                              colors = NavigationBarItemDefaults.colors(selectedIconColor = Gold, selectedTextColor = Gold, indicatorColor = Line, unselectedIconColor = Muted, unselectedTextColor = Muted)
-                          )
-                      }
-                  }
-              }) { pad ->
-                  Box(Modifier.padding(pad).padding(horizontal = 20.dp, vertical = 16.dp).fillMaxSize()) {
-                      if (page == "settings") SettingsScreen(a)
-                      else if (page == "scan") ScanScreen()
-                      else when (tab) {
-                          0 -> Home({ tab = 1 }, { page = "settings" }, { page = "scan" })
-                          1 -> TrackScreen()
-                          2 -> VaultScreen()
-                          else -> NightScreen()
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          fun Home(toTrack: () -> Unit, toSettings: () -> Unit, toScan: () -> Unit) {
-              val c = LocalContext.current
-              var tick by remember { mutableIntStateOf(0) }
-              LaunchedEffect(Unit) { while (true) { delay(1500); tick++ } }
-              val phone = remember(tick) { Store.get(c, "phone").isNotBlank() }
-              val admin = remember(tick) { c.getSystemService(DevicePolicyManager::class.java).isAdminActive(ComponentName(c, AdminReceiver::class.java)) }
-              val loc = remember(tick) { ContextCompat.checkSelfPermission(c, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED }
-              val ok = phone && admin && loc
-              val col = if (ok) Green else Gold
-
-              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                  Header("حارس الليل", "Night Guard - حماية شاملة") {
-                      IconButton(onClick = toSettings) { Icon(Icons.Filled.Settings, "الإعدادات", tint = Txt) }
-                  }
-                  Column(Modifier.fillMaxWidth().padding(vertical = 24.dp).clickable(enabled = !ok) { toSettings() }, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                      Box(Modifier.size(168.dp).border(6.dp, col, CircleShape), contentAlignment = Alignment.Center) {
-                          Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                              Icon(if (ok) Icons.Filled.CheckCircle else Icons.Filled.Warning, null, tint = col, modifier = Modifier.size(52.dp))
-                              Text(if (ok) "جهازك محمي" else "الإعداد ناقص", fontFamily = CairoFont, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Txt)
-                          }
-                      }
-                      Text(if (ok) "كل الأساسيات جاهزة والحماية نشطة" else "اضغط لإكمال إعدادات الحماية والطوارئ", fontFamily = CairoFont, color = Muted, fontSize = 13.sp)
-                  }
-                  Panel {
-                      Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                          Icon(Icons.Filled.LocationOn, null, tint = Gold)
-                          Text("صلاحية الموقع والتتبع", Modifier.weight(1f), fontFamily = CairoFont, fontWeight = FontWeight.SemiBold)
-                          Text(if (loc) "مفعّلة" else "ناقصة", color = if (loc) Green else Gold, fontFamily = CairoFont)
-                      }
-                  }
-                  Panel {
-                      Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                          Icon(Icons.Filled.Lock, null, tint = Gold)
-                          Text("مدير الجهاز للقفل عن بُعد", Modifier.weight(1f), fontFamily = CairoFont, fontWeight = FontWeight.SemiBold)
-                          Text(if (admin) "مفعّل" else "غير مفعّل", color = if (admin) Green else Gold, fontFamily = CairoFont)
-                      }
-                  }
-                  Panel(onClick = toScan) {
-                      Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                          Icon(Icons.Filled.Search, null, tint = Gold)
-                          Text("الفحص الشامل (فيروسات وفدية)", Modifier.weight(1f), fontFamily = CairoFont, fontWeight = FontWeight.SemiBold)
-                          Text("فحص الآن", color = Gold, fontFamily = CairoFont)
-                      }
-                  }
-                  Btn("بلّغ عن سرقة وإرسال موقع GPS فوراً", RedC, Color.White, Modifier.fillMaxWidth()) {
-                      val emergencyPhone = Store.get(c, "phone")
-                      if (emergencyPhone.isBlank()) {
-                          Toast.makeText(c, "الرجاء ضبط رقم الطوارئ في الإعدادات أولاً", Toast.LENGTH_LONG).show()
-                          toSettings()
-                      } else {
-                          try {
-                              val lm = c.getSystemService(LocationManager::class.java)
-                              val location = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                              val lat = location?.latitude ?: 30.0444
-                              val lng = location?.longitude ?: 31.2357
-                              val mapLink = "https://maps.google.com/?q=$lat,$lng"
-                              val smsMsg = "تنبيه سرقة! موقع الجهاز الحالي: $mapLink"
-                              
-                              val smsManager = c.getSystemService(SmsManager::class.java)
-                              smsManager.sendTextMessage(emergencyPhone, null, smsMsg, null, null)
-                              Toast.makeText(c, "تم إرسال رسالة الطوارئ وموقع الـ GPS لرقم الطوارئ بنجاح!", Toast.LENGTH_LONG).show()
-                          } catch (e: Exception) {
-                              Toast.makeText(c, "فشل إرسال الرسالة، تأكد من صلاحيات الـ SMS", Toast.LENGTH_LONG).show()
-                          }
-                          Guard.trigger(c, null)
-                          toTrack()
-                      }
-                  }
-              }
-          }
-
-          @Composable
-          fun TrackScreen() {
-              val c = LocalContext.current
-              var active by remember { mutableStateOf(isRunning(c, TheftService::class.java)) }
-              var loc by remember { mutableStateOf<Location?>(null) }
-              var siren by remember { mutableStateOf(false) }
-              val ring = remember { RingtoneManager.getRingtone(c, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)) }
-              DisposableEffect(Unit) { onDispose { ring.stop() } }
-
-              LaunchedEffect(Unit) {
+              fun sha256(ins: InputStream): String {
+                  val md = MessageDigest.getInstance("SHA-256")
+                  val buf = ByteArray(65536)
                   while (true) {
-                      active = isRunning(c, TheftService::class.java)
-                      loc = try {
-                          val lm = c.getSystemService(LocationManager::class.java)
-                          lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                      } catch (e: Exception) { null }
-                      delay(2000)
+                      val n = ins.read(buf)
+                      if (n <= 0) break
+                      md.update(buf, 0, n)
+                  }
+                  return md.digest().joinToString("") { "%02x".format(it) }
+              }
+
+              fun cached(c: Context, sha: String): Res? = try {
+                  val a = (p(c).getString("h:" + sha, null) ?: "").split("|")
+                  if (a.size < 5 || System.currentTimeMillis() - a[4].toLong() > 3L * 24 * 3600 * 1000) null
+                  else Res(a[0].toInt(), a[1].toInt(), a[2].toInt(), a[3].toInt())
+              } catch (e: Exception) { null }
+
+              fun store(c: Context, sha: String, r: Res) {
+                  p(c).edit().putString("h:" + sha, r.code.toString() + "|" + r.mal + "|" + r.sus + "|" + r.total + "|" + System.currentTimeMillis()).apply()
+              }
+
+              fun lookup(key: String, sha: String): Res = try {
+                  val con = URL("https://www.virustotal.com/api/v3/files/" + sha).openConnection() as HttpURLConnection
+                  con.setRequestProperty("x-apikey", key)
+                  con.connectTimeout = 15000
+                  con.readTimeout = 20000
+                  when (con.responseCode) {
+                      200 -> {
+                          val body = con.inputStream.bufferedReader().use { it.readText() }
+                          val st = JSONObject(body).getJSONObject("data").getJSONObject("attributes").getJSONObject("last_analysis_stats")
+                          val mal = st.optInt("malicious")
+                          val sus = st.optInt("suspicious")
+                          Res(0, mal, sus, mal + sus + st.optInt("undetected") + st.optInt("harmless"))
+                      }
+                      404 -> Res(1, 0, 0, 0)
+                      401, 403 -> Res(2, 0, 0, 0)
+                      429 -> Res(3, 0, 0, 0)
+                      else -> Res(4, 0, 0, 0)
+                  }
+              } catch (e: Exception) { Res(4, 0, 0, 0) }
+          }
+
+          object AvRun {
+              private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+              private var job: Job? = null
+              var running by mutableStateOf(false)
+              var finished by mutableStateOf(false)
+              var done by mutableIntStateOf(0)
+              var total by mutableIntStateOf(0)
+              var unknown by mutableIntStateOf(0)
+              var status by mutableStateOf("")
+              val hits = mutableStateListOf<AvHit>()
+              val ignored = mutableStateListOf<String>()
+
+              fun stop() {
+                  job?.cancel()
+                  running = false
+              }
+
+              fun start(c: Context) {
+                  if (running) return
+                  val ctx = c.applicationContext
+                  val key = Store.get(ctx, "vtkey")
+                  running = true
+                  finished = false
+                  done = 0
+                  unknown = 0
+                  hits.clear()
+                  ignored.clear()
+                  status = "جاري التحضير..."
+                  job = scope.launch {
+                      val pm = ctx.packageManager
+                      @Suppress("DEPRECATION")
+                      val apps = pm.getInstalledApplications(0).filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 && it.packageName != ctx.packageName }
+                      total = apps.size
+                      var lastNet = 0L
+                      for (ai in apps) {
+                          if (!isActive) break
+                          val label = try { ai.loadLabel(pm).toString() } catch (e: Exception) { ai.packageName }
+                          status = label
+                          val sha = try { File(ai.sourceDir).inputStream().use { Av.sha256(it) } } catch (e: Exception) { null }
+                          if (sha == null) { done++; continue }
+                          var r = Av.cached(ctx, sha)
+                          if (r == null) {
+                              val wait = 16000L - (System.currentTimeMillis() - lastNet)
+                              if (wait > 0) delay(wait)
+                              r = Av.lookup(key, sha)
+                              lastNet = System.currentTimeMillis()
+                              if (r.code == 2) { status = "مفتاح API غير صحيح"; running = false; return@launch }
+                              if (r.code == 3) { status = "وصلت للحد المسموح (٤ في الدقيقة أو ٥٠٠ في اليوم). حاول لاحقًا، وهيكمل من حيث وقف."; running = false; return@launch }
+                              if (r.code == 4) { status = "تعذّر الاتصال بالإنترنت"; running = false; return@launch }
+                              Av.store(ctx, sha, r)
+                          }
+                          if (r.code == 1) unknown++
+                          else if (r.mal >= 1 || r.sus >= 3) hits.add(AvHit(ai.packageName, label, r.mal, r.sus, r.total))
+                          done++
+                      }
+                      status = "اكتمل الفحص"
+                      finished = true
+                      running = false
                   }
               }
-              val l = loc
-              val shape = RoundedCornerShape(16.dp)
+          }
 
-              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                  Box(Modifier.fillMaxWidth().clip(shape).background(if (active) RedC else CardBg).border(1.dp, if (active) RedC else Line, shape).padding(16.dp)) {
-                      Column {
-                          Text(if (active) "وضع السرقة مفعّل ومباشر" else "وضع السرقة غير مفعّل", fontFamily = CairoFont, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Txt)
-                          Text(if (active) "الموقع الحقيقي لـ GPS يتم بثه لرقم الطوارئ" else "اضغط تفعيل لتشغيل رصد الـ GPS الحقيقي", fontFamily = CairoFont, fontSize = 13.sp, color = Txt)
-                      }
-                  }
-                  Box(Modifier.fillMaxWidth().height(250.dp).clip(shape).background(Color(0xFF101830)).border(1.dp, Line, shape)) {
-                      Canvas(Modifier.fillMaxSize()) {
-                          val st = 36.dp.toPx()
-                          val gc = Color(0xFF1B2545)
-                          var x = 0f
-                          while (x < size.width) { drawLine(gc, Offset(x, 0f), Offset(x, size.height)); x += st }
-                          var y = 0f
-                          while (y < size.height) { drawLine(gc, Offset(0f, y), Offset(size.width, y)); y += st }
-                          if (l != null) {
-                              drawCircle(RedC.copy(alpha = 0.25f), 30.dp.toPx(), center)
-                              drawCircle(Color.White, 12.dp.toPx(), center)
-                              drawCircle(RedC, 9.dp.toPx(), center)
+          private fun describe(r: Av.Res): String = when (r.code) {
+              0 -> if (r.mal >= 3) "⚠ خبيث: " + r.mal + " من " + r.total + " محرك رصده"
+                  else if (r.mal > 0 || r.sus > 0) "مشبوه: " + (r.mal + r.sus) + " من " + r.total + " محرك (ممكن يكون إنذار كاذب)"
+                  else "نظيف: لم يرصده أي من " + r.total + " محرك"
+              1 -> "غير معروف لدى المحركات (ملف جديد أو خاص)، مينفعش الحكم عليه"
+              2 -> "مفتاح API غير صحيح"
+              3 -> "وصلت للحد المسموح، حاول لاحقًا"
+              else -> "تعذّر الاتصال بالإنترنت"
+          }
+
+          @Composable
+          fun ScanScreen() {
+              val c = LocalContext.current
+              val scope = rememberCoroutineScope()
+              var key by remember { mutableStateOf(Store.get(c, "vtkey")) }
+              var edit by remember { mutableStateOf(Store.get(c, "vtkey").isBlank()) }
+              var fileMsg by remember { mutableStateOf("") }
+              val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  if (uri != null) scope.launch {
+                      fileMsg = "جاري فحص الملف..."
+                      fileMsg = withContext(Dispatchers.IO) {
+                          val sha = try { c.contentResolver.openInputStream(uri)?.use { Av.sha256(it) } } catch (e: Exception) { null }
+                          if (sha == null) "تعذّر قراءة الملف"
+                          else {
+                              var r = Av.cached(c, sha)
+                              if (r == null) {
+                                  r = Av.lookup(Store.get(c, "vtkey"), sha)
+                                  if (r.code == 0 || r.code == 1) Av.store(c, sha, r)
+                              }
+                              describe(r)
                           }
                       }
-                      Text(
-                          if (l != null) String.format(Locale.US, "GPS: %.5f , %.5f", l.latitude, l.longitude) else "جاري جلب إحداثيات GPS الحقيقية...",
-                          Modifier.align(Alignment.TopStart).padding(12.dp).background(BG, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 6.dp),
-                          color = Gold, fontSize = 13.sp
-                      )
                   }
-                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(
+              }
+              val hits = AvRun.hits.filter { it.pkg !in AvRun.ignored }
+              Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                  Header("الفحص الأمني", "فحص بصمات التطبيقات عبر محركات VirusTotal")
+                  if (edit) {
+                      Panel {
+                          Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                              Text("للفحص الحقيقي محتاج مفتاح VirusTotal API مجاني:", color = Txt, fontWeight = FontWeight.SemiBold)
+                              Text("١) افتح virustotal.com وسجّل حساب مجاني\n٢) من صورة الحساب اختار API key وانسخه\n٣) الصقه هنا", fontSize = 12.sp, color = Muted)
+                              OutlinedTextField(key, { key = it.trim() }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("VirusTotal API key") })
+                              Btn("حفظ المفتاح", Gold, BG, Modifier.fillMaxWidth()) {
+                                  if (key.length >= 32) { Store.set(c, "vtkey", key); edit = false }
+                                  else Toast.makeText(c, "المفتاح غير صحيح", Toast.LENGTH_SHORT).show()
+                              }
+                          }
+                      }
+                  } else {
+                      Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                          Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
+                              val prog = if (AvRun.finished) 1f else if (AvRun.total == 0) 0f else AvRun.done.toFloat() / AvRun.total
+                              CircularProgressIndicator(progress = prog, modifier = Modifier.fillMaxSize(), color = if (hits.any { it.mal >= 3 }) RedC else Green, strokeWidth = 10.dp, trackColor = Line)
+                              Text(
+                                  if (AvRun.running) AvRun.done.toString() + "/" + AvRun.total
+                                  else if (AvRun.finished) (if (hits.isEmpty()) "جهازك آمن" else hits.size.toString() + " للمراجعة")
+                                  else "جاهز للفحص",
+                                  fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Txt
+                              )
+                          }
+                      }
+                      if (AvRun.status.isNotBlank()) Text(AvRun.status, color = Muted, fontSize = 12.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
+                      Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                          Panel(Modifier.weight(1f)) {
+                              Column(Modifier.padding(12.dp)) {
+                                  Text(AvRun.done.toString(), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Txt)
+                                  Text("تم فحصه", fontSize = 11.sp, color = Muted)
+                              }
+                          }
+                          Panel(Modifier.weight(1f)) {
+                              Column(Modifier.padding(12.dp)) {
+                                  Text(AvRun.unknown.toString(), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Txt)
+                                  Text("غير معروف", fontSize = 11.sp, color = Muted)
+                              }
+                          }
+                          Panel(Modifier.weight(1f)) {
+                              Column(Modifier.padding(12.dp)) {
+                                  Text(hits.size.toString(), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFF8A8A))
+                                  Text("للمراجعة", fontSize = 11.sp, color = Muted)
+                              }
+                          }
+                      }
+                      Btn(if (AvRun.running) "إيقاف الفحص" else "ابدأ فحص التطبيقات", Gold, BG, Modifier.fillMaxWidth()) {
+                          if (AvRun.running) AvRun.stop() else AvRun.start(c)
+                      }
+                      if (AvRun.running) Text("المتبقي بحد أقصى حوالي " + ((AvRun.total - AvRun.done) * 16 / 60 + 1) + " دقيقة (النتائج المحفوظة بتخلص أسرع).", fontSize = 12.sp, color = Muted)
+                      Btn("فحص ملف من الجهاز", Line, Txt, Modifier.fillMaxWidth()) { picker.launch(arrayOf("*/*")) }
+                      if (fileMsg.isNotBlank()) Text(fileMsg, color = Gold, fontSize = 13.sp)
+                      hits.forEach { h ->
+                          Panel(border = if (h.mal >= 3) RedC else Gold) {
+                              Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                  Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                      Icon(Icons.Filled.Warning, null, tint = if (h.mal >= 3) Color(0xFFFF8A8A) else Gold, modifier = Modifier.size(24.dp))
+                                      Column(Modifier.weight(1f)) {
+                                          Text(h.label, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Txt)
+                                          Text(
+                                              (if (h.mal >= 3) "خبيث: " else "مشبوه: ") + (h.mal + h.sus) + " من " + h.total + " محرك" + (if (h.mal < 3) " (ممكن إنذار كاذب)" else ""),
+                                              fontSize = 12.sp, color = Muted
+                                          )
+                                      }
+                                  }
+                                  Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                      Btn("إزالة", RedC, Color.White, Modifier.weight(1f)) {
+                                          c.startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + h.pkg)))
+                                      }
+                                      Btn("تجاهل", Line, Txt, Modifier.weight(1f)) { AvRun.ignored.add(h.pkg) }
+                                  }
+                              }
+                          }
+                      }
+                      TextButton(onClick = { edit = true }) { Text("تغيير مفتاح API", color = Gold) }
+                  }
+                  Text("بيتبعت بصمة الملف (SHA-256) فقط لـ VirusTotal، مش الملف نفسه. التطبيقات الجديدة أو الخاصة بتظهر «غير معروف». ده فحص عند الطلب وليس حماية لحظية، وبيحتاج إنترنت.", fontSize = 12.sp, color = Muted)
+              }
+          }
+          AV_EOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: cd NightGuard && gradle assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NightGuard-apk
+          path: NightGuard/app/build/outputs/apk/debug/app-debug.apk
